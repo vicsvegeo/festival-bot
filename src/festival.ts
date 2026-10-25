@@ -42,6 +42,8 @@ export interface Track {
   bpm?: number;
   key?: string;
   genres: string[];
+  // `artist` split into the individual credited artists.
+  artists: string[];
   // When the track went live in Epic's catalog.
   releasedAt?: string;
   // 0–6, the same scale as the in-game difficulty bars.
@@ -86,18 +88,87 @@ export function rotationEndsAt(id: string): Date | undefined {
 
 export type CatalogView = "all" | "rotation" | "new";
 
-// Alphabetical, except "new" which is newest release first. A query keeps
-// searchTracks' relevance order.
+// A query of "artist:<key>" lists exactly that artist's songs (see
+// listArtists); any other query is a text search.
+export const ARTIST_QUERY_PREFIX = "artist:";
+
+// Alphabetical, except "new" which is newest release first. A text search
+// keeps searchTracks' relevance order.
 export function listTracks(view: CatalogView, query = ""): Track[] {
-  let tracks = query.trim()
-    ? searchTracks(query, Infinity)
-    : [...catalog.values()].sort((a, b) => a.title.localeCompare(b.title));
+  const q = query.trim();
+  const artistKey = q.startsWith(ARTIST_QUERY_PREFIX) ? normalize(q.slice(ARTIST_QUERY_PREFIX.length)) : undefined;
+  const search = artistKey === undefined && q !== "";
+
+  let tracks = search ? searchTracks(q, Infinity) : [...catalog.values()].sort((a, b) => a.title.localeCompare(b.title));
+  if (artistKey !== undefined) {
+    tracks = tracks.filter((t) => t.artists.some((a) => normalize(a) === artistKey));
+  }
   if (view === "rotation") {
     tracks = tracks.filter((t) => rotation.has(t.id));
-  } else if (view === "new" && !query.trim()) {
+  } else if (view === "new" && !search) {
     tracks.sort((a, b) => (b.releasedAt ?? "").localeCompare(a.releasedAt ?? ""));
   }
   return tracks;
+}
+
+export interface Artist {
+  key: string;
+  name: string;
+  songs: number;
+  inRotation: number;
+}
+
+export type ArtistSort = "count" | "name";
+
+// Every credited artist, collaborators included, with how many songs they're
+// on. Sorted by song count, or A–Z.
+export function listArtists(sort: ArtistSort, query = ""): Artist[] {
+  const byKey = new Map<string, Artist>();
+  for (const track of catalog.values()) {
+    for (const name of track.artists) {
+      const key = normalize(name);
+      const artist = byKey.get(key) ?? { key, name, songs: 0, inRotation: 0 };
+      artist.songs++;
+      if (rotation.has(track.id)) {
+        artist.inRotation++;
+      }
+      byKey.set(key, artist);
+    }
+  }
+  const q = normalize(query);
+  return [...byKey.values()]
+    .filter((a) => !q || a.key.includes(q))
+    .sort((a, b) => (sort === "count" ? b.songs - a.songs : 0) || a.name.localeCompare(b.name));
+}
+
+export function getArtistName(key: string): string | undefined {
+  for (const track of catalog.values()) {
+    const name = track.artists.find((a) => normalize(a) === key);
+    if (name) {
+      return name;
+    }
+  }
+  return undefined;
+}
+
+// Names Epic credits that contain a separator but are one act.
+const SINGLE_ACTS = new Set(["earth, wind & fire", "coheed and cambria", "rob base & dj ez rock", "haute & freddy"]);
+
+// Splits an Epic credit like "Snoop Dogg & Wiz Khalifa ft. Bruno Mars" into
+// its artists. ",", "&" and "and" don't split before "The ...", which keeps
+// "Tyler, The Creator" and "Huey Lewis & The News" whole.
+function splitArtists(credit: string): string[] {
+  const trimmed = credit.trim();
+  if (!trimmed) {
+    return [];
+  }
+  if (SINGLE_ACTS.has(trimmed.toLowerCase())) {
+    return [trimmed];
+  }
+  return trimmed
+    .split(/\s+(?:ft\.|feat\.|featuring|w\/)\s+|(?:,|\s+&|\s+and)\s+(?!the\s)/i)
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -127,6 +198,7 @@ async function refreshCatalog(): Promise<void> {
       bpm: t.mt,
       key: t.mk ? `${t.mk} ${t.mm ?? ""}`.trim() : undefined,
       genres: t.ge ?? [],
+      artists: splitArtists(t.an ?? ""),
       releasedAt: _activeDate,
       difficulty: { lead: t.in?.gr, bass: t.in?.ba, drums: t.in?.ds, vocals: t.in?.vl },
     });

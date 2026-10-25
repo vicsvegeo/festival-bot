@@ -6,6 +6,7 @@ A Discord bot for Fortnite Festival. It DMs you when a song you follow enters th
 
 - `/subscribe song:` autocompletes over the whole Jam Track catalog, with 🟢 on songs in the free rotation right now.
 - `/catalog [view] [search]` is a paged list (25 per page) with a multi-select to subscribe. Its tabs are All, In rotation and Newest.
+- `/artists [sort] [search]` lists every artist with their song count and how many are in rotation. Collaborations count toward each credited artist, so "Bad Bunny and Jhayco" counts for both. Picking an artist opens their songs in the catalog view. `/catalog search:artist:<name>` does the same directly.
 - `/subscriptions` lists your songs, each with an unsubscribe button, plus the new-song alerts toggle.
 - `/festival-preview` only exists when `FESTIVAL_PREVIEW=1`. It DMs you one of each alert, built from live data, for checking the design.
 

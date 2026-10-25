@@ -15,13 +15,17 @@ import {
   StringSelectMenuBuilder,
 } from "discord.js";
 import {
+  ARTIST_QUERY_PREFIX,
+  type ArtistSort,
   buildTrackEmbed,
   buildUnsubscribeRow,
   type CatalogView,
   FESTIVAL_COLOR,
+  getArtistName,
   getTrack,
   hasReleaseAlerts,
   isInRotation,
+  listArtists,
   listSubscriptions,
   listTracks,
   RELEASE_ALERTS_PREFIX,
@@ -37,12 +41,17 @@ import {
 } from "./festival.js";
 
 const CATALOG_PREFIX = "festcat";
+const ARTISTS_PREFIX = "festart";
 // A select menu holds at most 25 options, so that's a page.
 const PAGE_SIZE = 25;
 const VIEWS: { view: CatalogView; label: string; emoji: string; title: string }[] = [
   { view: "all", label: "All", emoji: "🎵", title: "All Jam Tracks" },
   { view: "rotation", label: "Rotation", emoji: "🟢", title: "In the free rotation" },
   { view: "new", label: "Newest", emoji: "🆕", title: "Newest releases" },
+];
+const ARTIST_SORTS: { sort: ArtistSort; label: string; emoji: string; title: string }[] = [
+  { sort: "count", label: "Most songs", emoji: "🔢", title: "Most songs" },
+  { sort: "name", label: "A–Z", emoji: "🔤", title: "A–Z" },
 ];
 
 const COMMANDS = [
@@ -61,7 +70,19 @@ const COMMANDS = [
         .setDescription("Which songs to list")
         .addChoices(...VIEWS.map(({ view, title }) => ({ name: title, value: view }))),
     )
-    .addStringOption((option) => option.setName("search").setDescription("Filter by title or artist")),
+    .addStringOption((option) =>
+      option.setName("search").setDescription("Filter by title or artist, or artist:<name> for one artist's songs"),
+    ),
+  new SlashCommandBuilder()
+    .setName("artists")
+    .setDescription("Browse Fortnite Festival artists by number of Jam Tracks, then pick one to see their songs")
+    .addStringOption((option) =>
+      option
+        .setName("sort")
+        .setDescription("How to order the artists")
+        .addChoices(...ARTIST_SORTS.map(({ sort, title }) => ({ name: title, value: sort }))),
+    )
+    .addStringOption((option) => option.setName("search").setDescription("Filter by artist name")),
   new SlashCommandBuilder()
     .setName("subscriptions")
     .setDescription("List the Fortnite Festival songs you're subscribed to"),
@@ -115,6 +136,14 @@ async function renderCatalog(
   const pageTracks = tracks.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
   const subscribed = new Set(await listSubscriptions(userId));
   const { title } = VIEWS.find((v) => v.view === view)!;
+  const artistKey = query.startsWith(ARTIST_QUERY_PREFIX) ? query.slice(ARTIST_QUERY_PREFIX.length) : undefined;
+  const artistName = artistKey !== undefined ? (getArtistName(artistKey) ?? artistKey) : undefined;
+  let heading = title;
+  if (artistName) {
+    heading = view === "all" ? `Songs by ${artistName}` : `${title} · ${artistName}`;
+  } else if (query) {
+    heading = `${title} matching “${query}”`;
+  }
 
   const lines = pageTracks.map((t) => {
     const marker = subscribed.has(t.id) ? "🔔" : isInRotation(t.id) ? "🟢" : "▫️";
@@ -125,7 +154,7 @@ async function renderCatalog(
   const embed = new EmbedBuilder()
     .setColor(FESTIVAL_COLOR)
     .setAuthor({ name: "🎸 Fortnite Festival · Jam Track catalog" })
-    .setTitle(query ? `${title} matching “${query}”` : title)
+    .setTitle(heading)
     .setDescription(truncate(lines.join("\n") || "No songs match.", 4096))
     .setFooter({
       text: `Page ${page + 1}/${pageCount} · ${tracks.length} songs · 🟢 in rotation · 🔔 subscribed`,
@@ -172,8 +201,98 @@ async function renderCatalog(
     ),
   );
   components.push(nav);
+  if (artistKey !== undefined) {
+    components.push(
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(artistsId("back", "count", 0, ""))
+          .setLabel("Artists")
+          .setEmoji("◀️")
+          .setStyle(ButtonStyle.Secondary),
+      ),
+    );
+  }
 
   return { content: notice ?? "", embeds: [embed], components };
+}
+
+// Same scheme as the catalog: festart:<action>:<sort>:<page>:<query>.
+function artistsId(action: string, sort: ArtistSort, page: number, query: string): string {
+  return `${ARTISTS_PREFIX}:${action}:${sort}:${page}:${query}`.slice(0, 100);
+}
+
+function parseArtistsId(customId: string): { action: string; sort: ArtistSort; page: number; query: string } {
+  const [, action, sort, page, ...rest] = customId.split(":");
+  return {
+    action,
+    sort: sort === "name" ? "name" : "count",
+    page: Number(page) || 0,
+    query: rest.join(":"),
+  };
+}
+
+function renderArtists(sort: ArtistSort, requestedPage: number, query: string): InteractionUpdateOptions {
+  query = query.slice(0, 60);
+  const artists = listArtists(sort, query);
+  const pageCount = Math.max(1, Math.ceil(artists.length / PAGE_SIZE));
+  const page = Math.min(Math.max(0, requestedPage), pageCount - 1);
+  const pageArtists = artists.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const songCount = (n: number) => `${n} song${n === 1 ? "" : "s"}`;
+
+  const lines = pageArtists.map((a) => {
+    const rotation = a.inRotation > 0 ? ` · 🟢 ${a.inRotation} in rotation` : "";
+    return `**${a.name}** — ${songCount(a.songs)}${rotation}`;
+  });
+  const embed = new EmbedBuilder()
+    .setColor(FESTIVAL_COLOR)
+    .setAuthor({ name: "🎸 Fortnite Festival · Artists" })
+    .setTitle(query ? `Artists matching “${query}”` : `Artists · ${ARTIST_SORTS.find((s) => s.sort === sort)!.title}`)
+    .setDescription(truncate(lines.join("\n") || "No artists match.", 4096))
+    .setFooter({
+      text: `Page ${page + 1}/${pageCount} · ${artists.length} artists · collaborations count for every artist on them`,
+    });
+
+  const components: ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>[] = [];
+  if (pageArtists.length > 0) {
+    components.push(
+      new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId(artistsId("pick", sort, page, query))
+          .setPlaceholder("🎤 Pick an artist to see their songs…")
+          .addOptions(
+            pageArtists.map((a) => ({
+              label: truncate(a.name, 100),
+              description: `${songCount(a.songs)}${a.inRotation > 0 ? ` · ${a.inRotation} in rotation` : ""}`,
+              value: a.key.slice(0, 100),
+            })),
+          ),
+      ),
+    );
+  }
+  components.push(
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(artistsId("prev", sort, page - 1, query))
+        .setEmoji("◀️")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(page === 0),
+      new ButtonBuilder()
+        .setCustomId(artistsId("next", sort, page + 1, query))
+        .setEmoji("▶️")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(page >= pageCount - 1),
+      ...ARTIST_SORTS.map((s) =>
+        new ButtonBuilder()
+          .setCustomId(artistsId(`sort${s.sort}`, s.sort, 0, query))
+          .setLabel(s.label)
+          .setEmoji(s.emoji)
+          .setStyle(s.sort === sort ? ButtonStyle.Primary : ButtonStyle.Secondary)
+          .setDisabled(s.sort === sort),
+      ),
+    ),
+  );
+
+  return { content: "", embeds: [embed], components };
 }
 
 async function handleSubscribe(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -264,7 +383,7 @@ async function handleSubscriptions(interaction: ChatInputCommandInteraction): Pr
 }
 
 const COMMAND_NAMES = new Set(COMMANDS.map((c) => c.name));
-const COMPONENT_PREFIXES = [CATALOG_PREFIX, SUBSCRIBE_PREFIX, RELEASE_ALERTS_PREFIX, UNSUBSCRIBE_PREFIX];
+const COMPONENT_PREFIXES = [CATALOG_PREFIX, ARTISTS_PREFIX, SUBSCRIBE_PREFIX, RELEASE_ALERTS_PREFIX, UNSUBSCRIBE_PREFIX];
 
 // Commands and components this module answers; autocomplete is excluded since
 // it can't be deferred.
@@ -293,7 +412,10 @@ export function registerFestivalCommands(client: Client): void {
       // Discord drops any interaction not acknowledged within 3 seconds, so
       // ours are acknowledged before any database or network work.
       if (isFestivalInteraction(interaction)) {
-        if (interaction.isMessageComponent() && interaction.customId.startsWith(`${CATALOG_PREFIX}:`)) {
+        // Catalog and artist pages edit themselves in place; everything else
+        // answers with a new private message.
+        const pages = [`${CATALOG_PREFIX}:`, `${ARTISTS_PREFIX}:`];
+        if (interaction.isMessageComponent() && pages.some((p) => interaction.customId.startsWith(p))) {
           await interaction.deferUpdate();
         } else if (interaction.isRepliable()) {
           await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -315,6 +437,16 @@ export function registerFestivalCommands(client: Client): void {
         const query = interaction.options.getString("search") ?? "";
         const page = await renderCatalog(interaction.user.id, view, 0, query);
         await interaction.editReply({ ...page, content: page.content || undefined });
+      } else if (interaction.isChatInputCommand() && interaction.commandName === "artists") {
+        const sort = (interaction.options.getString("sort") ?? "count") as ArtistSort;
+        const page = renderArtists(sort, 0, interaction.options.getString("search") ?? "");
+        await interaction.editReply({ ...page, content: page.content || undefined });
+      } else if (interaction.isStringSelectMenu() && interaction.customId.startsWith(`${ARTISTS_PREFIX}:`)) {
+        const query = `${ARTIST_QUERY_PREFIX}${interaction.values[0]}`;
+        await interaction.editReply(await renderCatalog(interaction.user.id, "all", 0, query));
+      } else if (interaction.isButton() && interaction.customId.startsWith(`${ARTISTS_PREFIX}:`)) {
+        const { sort, page, query } = parseArtistsId(interaction.customId);
+        await interaction.editReply(renderArtists(sort, page, query));
       } else if (interaction.isChatInputCommand() && interaction.commandName === "festival-preview") {
         const sent = await sendPreview(interaction.client, interaction.user.id);
         await interaction.editReply({ content: `Sent ${sent} sample alerts to your DMs.` });
