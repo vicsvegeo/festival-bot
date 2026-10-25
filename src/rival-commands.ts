@@ -10,6 +10,8 @@ import {
   InteractionContextType,
   MessageFlags,
   SlashCommandBuilder,
+  type StringSelectMenuInteraction,
+  StringSelectMenuBuilder,
 } from "discord.js";
 import { INSTRUMENTS, type Instrument, isEpicConfigured, lookupEpicAccount } from "./epic.js";
 import { getTrack, isInRotation, searchTracks } from "./festival.js";
@@ -26,11 +28,13 @@ import {
   RIVAL_REMOVE_PREFIX,
   setLink,
 } from "./rivals.js";
+import { getTop10kInstruments, setTop10kInstruments } from "./top10k.js";
 
 // Each rivalry is one leaderboard request an hour, so keep it bounded.
 const MAX_RIVALRIES = 50;
 const DEFAULT_INSTRUMENT: Instrument = "Solo_Vocals";
 const RIVAL_COLOR = 0xff4d6d;
+const TOP10K_SELECT = "festtop10k";
 
 export const RIVAL_COMMANDS = [
   new SlashCommandBuilder()
@@ -56,6 +60,9 @@ export const RIVAL_COMMANDS = [
         ),
     )
     .addSubcommand((sub) => sub.setName("list").setDescription("Your rivalries and where you stand")),
+  new SlashCommandBuilder()
+    .setName("top10k")
+    .setDescription("Pick instruments for a weekly summary of your all-time top 10,000 scores"),
 ].map((command) =>
   command
     .setIntegrationTypes(ApplicationIntegrationType.GuildInstall)
@@ -167,10 +174,47 @@ async function handleList(interaction: ChatInputCommandInteraction): Promise<voi
   await interaction.editReply({ embeds: [embed], components: rows });
 }
 
+async function renderTop10k(discordUserId: string, notice?: string) {
+  const link = await getLink(discordUserId);
+  const picked = new Set(await getTop10kInstruments(discordUserId));
+  const lines = [
+    notice,
+    "Every Sunday at 18:00 UTC I'll look up your all-time rank on every song for the instruments you pick here, and DM you the ones in the top 10,000, with changes since last week.",
+    picked.size > 0
+      ? `Tracking: **${[...picked].map((i) => INSTRUMENTS[i]).join(", ")}**.`
+      : "Not tracking any instruments yet.",
+    link ? "" : "⚠️ Link your Epic account with `/link` first, or there's nothing to look up.",
+  ];
+  return {
+    content: lines.filter(Boolean).join("\n\n"),
+    components: [
+      new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId(TOP10K_SELECT)
+          .setPlaceholder("Pick instruments (none to turn it off)…")
+          .setMinValues(0)
+          .setMaxValues(Object.keys(INSTRUMENTS).length)
+          .addOptions(
+            Object.entries(INSTRUMENTS).map(([value, label]) => ({ label, value, default: picked.has(value as Instrument) })),
+          ),
+      ),
+    ],
+  };
+}
+
+async function handleTop10kSelect(interaction: StringSelectMenuInteraction): Promise<void> {
+  const instruments = interaction.values.filter((v): v is Instrument => v in INSTRUMENTS);
+  await setTop10kInstruments(interaction.user.id, instruments);
+  await interaction.editReply(
+    await renderTop10k(interaction.user.id, instruments.length > 0 ? "✅ Saved." : "🔕 Top 10,000 summary turned off."),
+  );
+}
+
 export function registerRivalCommands(client: Client): void {
   client.on(Events.InteractionCreate, async (interaction) => {
     const isRivalCommand =
-      interaction.isChatInputCommand() && (interaction.commandName === "link" || interaction.commandName === "rival");
+      interaction.isChatInputCommand() && ["link", "rival", "top10k"].includes(interaction.commandName);
+    const isTop10kSelect = interaction.isStringSelectMenu() && interaction.customId === TOP10K_SELECT;
     const isRemove = interaction.isButton() && interaction.customId.startsWith(`${RIVAL_REMOVE_PREFIX}:`);
     try {
       if (interaction.isAutocomplete() && interaction.commandName === "rival") {
@@ -183,17 +227,26 @@ export function registerRivalCommands(client: Client): void {
         );
         return;
       }
-      if (!isRivalCommand && !isRemove) {
+      if (!isRivalCommand && !isRemove && !isTop10kSelect) {
         return;
       }
-      // Acknowledged first: Discord drops interactions after 3 seconds.
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      // Acknowledged first: Discord drops interactions after 3 seconds. The
+      // instrument picker edits itself in place.
+      if (interaction.isStringSelectMenu()) {
+        await interaction.deferUpdate();
+      } else if (interaction.isRepliable()) {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      }
       if (!isEpicConfigured()) {
         await interaction.editReply({ content: "Rivalries need the bot's Epic login, which isn't set up." });
         return;
       }
 
-      if (interaction.isButton()) {
+      if (interaction.isStringSelectMenu()) {
+        await handleTop10kSelect(interaction);
+      } else if (interaction.isChatInputCommand() && interaction.commandName === "top10k") {
+        await interaction.editReply(await renderTop10k(interaction.user.id));
+      } else if (interaction.isButton()) {
         const removed = await removeRivalry(interaction.user.id, Number(interaction.customId.split(":")[1]));
         await interaction.editReply({
           content: removed

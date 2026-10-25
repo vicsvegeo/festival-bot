@@ -2,6 +2,7 @@ import { ActionRowBuilder, ButtonBuilder, ButtonStyle, type Client, EmbedBuilder
 import { getPool } from "./db.js";
 import { type BoardScore, type EpicAccount, fetchAllTimeScores, INSTRUMENTS, type Instrument, isEpicConfigured } from "./epic.js";
 import { getTrack, type Track } from "./festival.js";
+import { buildTop10kEmbeds, clearTop10kRanks, ensureTop10kTables, saveTop10k, sweepTop10k, TOP_BOARD_SIZE } from "./top10k.js";
 
 // Rivalries: "tell me when <Epic player> passes my all-time score on <song>
 // on <instrument>", plus a weekly report of every rivalry board. Only the
@@ -12,7 +13,6 @@ const FIRST_CHECK_DELAY_MS = 2 * 60 * 1000;
 // Weekly report: Sundays at 18:00 UTC.
 const REPORT_DAY = 0;
 const REPORT_HOUR_UTC = 18;
-const TOP_BOARD_SIZE = 10_000;
 
 const RIVAL_COLOR = 0xff4d6d;
 const REPORT_COLOR = 0x5b8cff;
@@ -118,6 +118,7 @@ export async function setLink(discordUserId: string, account: EpicAccount): Prom
        WHERE discord_user_id = $1`,
       [discordUserId],
     );
+    await clearTop10kRanks(discordUserId);
   }
 }
 
@@ -364,42 +365,60 @@ function reportField(r: Rivalry, meName: string): { name: string; value: string 
   };
 }
 
-// Weekly: once per boundary, a DM with every rivalry board's standing and the
-// rank change since the previous report. Runs right after the hourly check,
-// so the numbers are at most an hour old.
+// Weekly: once per boundary, a DM with the top 10,000 summary (if the person
+// picked instruments with /top10k) and every rivalry board's standing, with
+// rank changes since the previous report. Rivalry numbers come from the
+// hourly check that runs just before, so they're at most an hour old.
 async function sendWeeklyReports(client: Client): Promise<void> {
   const pool = getPool();
   const boundary = lastReportBoundary(new Date());
   const due = await pool.query(
-    `SELECT l.discord_user_id, l.epic_display_name
+    `SELECT l.discord_user_id, l.epic_account_id, l.epic_display_name
      FROM epic_link l
      LEFT JOIN rivalry_report rr ON rr.discord_user_id = l.discord_user_id
-     WHERE COALESCE(rr.sent_at, (SELECT min(created_at) FROM rivalry r WHERE r.discord_user_id = l.discord_user_id)) < $1
-       AND EXISTS (SELECT 1 FROM rivalry r WHERE r.discord_user_id = l.discord_user_id AND r.created_at < $1)`,
+     WHERE (rr.sent_at IS NULL OR rr.sent_at < $1)
+       AND (EXISTS (SELECT 1 FROM rivalry r WHERE r.discord_user_id = l.discord_user_id AND r.created_at < $1)
+         OR EXISTS (SELECT 1 FROM top10k_instrument t WHERE t.discord_user_id = l.discord_user_id AND t.created_at < $1))`,
     [boundary],
   );
+  if (due.rows.length === 0) {
+    return;
+  }
+  const users = due.rows.map((row) => ({
+    discordUserId: row.discord_user_id as string,
+    accountId: row.epic_account_id as string,
+    meName: row.epic_display_name as string,
+  }));
+  const top10k = await sweepTop10k(users);
+  const week = boundary.toLocaleDateString("en-GB", { day: "numeric", month: "long" });
 
-  for (const { discord_user_id: userId, epic_display_name: meName } of due.rows as { discord_user_id: string; epic_display_name: string }[]) {
-    const rivalries = await listRivalries(userId);
-    const fields = rivalries.map((r) => reportField(r, meName));
+  for (const { discordUserId: userId, meName } of users) {
     const embeds: EmbedBuilder[] = [];
-    for (let i = 0; i < fields.length; i += 25) {
-      embeds.push(
-        new EmbedBuilder()
-          .setColor(REPORT_COLOR)
-          .setAuthor({ name: "📊 Fortnite Festival · Weekly rivalry report" })
-          .addFields(fields.slice(i, i + 25)),
-      );
+    const top = top10k.get(userId);
+    if (top) {
+      embeds.push(...buildTop10kEmbeds(top));
     }
-    embeds[0]
-      .setTitle(`Your all-time standings, week of ${boundary.toLocaleDateString("en-GB", { day: "numeric", month: "long" })}`)
-      .setDescription("Rank changes are since last week's report. 🏆 is the top 10,000.");
-    embeds.at(-1)!.setFooter({ text: "Manage rivalries with /rival list" }).setTimestamp();
+    const fields = (await listRivalries(userId)).map((r) => reportField(r, meName));
+    for (let i = 0; i < fields.length; i += 25) {
+      const embed = new EmbedBuilder().setColor(REPORT_COLOR).addFields(fields.slice(i, i + 25));
+      if (i === 0) {
+        embed
+          .setAuthor({ name: "⚔️ Fortnite Festival · Rivalries" })
+          .setFooter({ text: "Rank changes since last week · manage rivalries with /rival list" });
+      }
+      embeds.push(embed);
+    }
+    if (embeds.length === 0) {
+      continue;
+    }
 
     try {
       const user = await client.users.fetch(userId);
       for (let i = 0; i < embeds.length; i += 10) {
-        await user.send({ embeds: embeds.slice(i, i + 10) });
+        await user.send({
+          content: i === 0 ? `📊 **Weekly Festival report** — ${meName}, week of ${week}` : undefined,
+          embeds: embeds.slice(i, i + 10),
+        });
       }
       await pool.query(
         `INSERT INTO rivalry_report (discord_user_id, sent_at) VALUES ($1, $2)
@@ -410,6 +429,9 @@ async function sendWeeklyReports(client: Client): Promise<void> {
         "UPDATE rivalry SET week_my_rank = my_rank, week_rival_rank = rival_rank WHERE discord_user_id = $1",
         [userId],
       );
+      if (top) {
+        await saveTop10k(userId, top);
+      }
     } catch (err) {
       console.error(`[rivals] weekly report to ${userId} failed: ${err instanceof Error ? err.message : err}`);
     }
@@ -418,16 +440,25 @@ async function sendWeeklyReports(client: Client): Promise<void> {
 
 export async function startRivalWatcher(client: Client): Promise<void> {
   await ensureRivalTables();
+  await ensureTop10kTables();
   if (!isEpicConfigured()) {
     console.warn("[rivals] EPIC_DEVICE_AUTH is not set; rivalries are disabled");
     return;
   }
+  // A top 10,000 sweep can outlast the hour, so ticks never overlap.
+  let running = false;
   const tick = async () => {
+    if (running) {
+      return;
+    }
+    running = true;
     try {
       await checkRivalries(client);
       await sendWeeklyReports(client);
     } catch (err) {
       console.error(`[rivals] check failed: ${err instanceof Error ? err.message : err}`);
+    } finally {
+      running = false;
     }
   };
   // Give the festival watcher time to load the catalog, which maps tracks to
