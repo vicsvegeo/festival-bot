@@ -8,7 +8,8 @@ import { buildTop10kEmbeds, clearTop10kRanks, ensureTop10kTables, saveTop10k, sw
 // on <instrument>", plus a weekly report of every rivalry board. Only the
 // registered boards are ever queried.
 
-const CHECK_MS = 60 * 60 * 1000;
+const CHECK_MS = 60 * 1000;
+const REPORT_CHECK_MS = 15 * 60 * 1000;
 const FIRST_CHECK_DELAY_MS = 2 * 60 * 1000;
 // Weekly report: Sundays at 18:00 UTC.
 const REPORT_DAY = 0;
@@ -55,7 +56,7 @@ export async function ensureRivalTables(): Promise<void> {
       rival_display_name text NOT NULL,
       track_id text NOT NULL,
       instrument text NOT NULL,
-      -- standings at the last hourly check (null: no score yet)
+      -- standings at the last check (null: no score yet)
       my_score integer,
       rival_score integer,
       my_rank integer,
@@ -158,7 +159,7 @@ export async function fetchStanding(
   return scores && { mine: scores.get(myAccountId), theirs: scores.get(rivalAccountId) };
 }
 
-// Saves a new rivalry with its current standing, so the first hourly check
+// Saves a new rivalry with its current standing, so the first check
 // only alerts on a real change. Re-adding the same one refreshes it.
 export async function addRivalry(
   discordUserId: string,
@@ -248,7 +249,7 @@ export function buildStandingEmbed(
         gapLine(standing.mine?.score, standing.theirs?.score, rivalName),
       ].join("\n"),
     )
-    .setFooter({ text: kind === "overtaken" ? "Checked hourly · weekly report on Sundays" : "I'll DM you if they pass you · weekly report on Sundays" })
+    .setFooter({ text: kind === "overtaken" ? "Checked every minute · weekly report on Sundays" : "I'll DM you if they pass you · weekly report on Sundays" })
     .setTimestamp();
   if (track.cover) {
     embed.setThumbnail(track.cover);
@@ -266,7 +267,7 @@ export function buildRemoveRow(rivalryId: number): ActionRowBuilder<ButtonBuilde
   );
 }
 
-// Hourly: refresh every rivalry board (one request per song + instrument,
+// Every minute: refresh every rivalry board (one request per song + instrument,
 // covering everyone involved) and DM anyone whose rival just went from at or
 // below them to above them.
 async function checkRivalries(client: Client): Promise<void> {
@@ -368,7 +369,7 @@ function reportField(r: Rivalry, meName: string): { name: string; value: string 
 // Weekly: once per boundary, a DM with the top 10,000 summary (if the person
 // picked instruments with /top10k) and every rivalry board's standing, with
 // rank changes since the previous report. Rivalry numbers come from the
-// hourly check that runs just before, so they're at most an hour old.
+// per-minute check.
 async function sendWeeklyReports(client: Client): Promise<void> {
   const pool = getPool();
   const boundary = lastReportBoundary(new Date());
@@ -445,26 +446,33 @@ export async function startRivalWatcher(client: Client): Promise<void> {
     console.warn("[rivals] EPIC_DEVICE_AUTH is not set; rivalries are disabled");
     return;
   }
-  // A top 10,000 sweep can outlast the hour, so ticks never overlap.
+  // Give the festival watcher time to load the catalog, which maps tracks to
+  // their leaderboards.
+  setTimeout(() => {
+    every(CHECK_MS, "check", () => checkRivalries(client));
+    // Separate loop: the top 10,000 sweep takes minutes and mustn't hold up
+    // the rival checks.
+    every(REPORT_CHECK_MS, "weekly report", () => sendWeeklyReports(client));
+  }, FIRST_CHECK_DELAY_MS);
+}
+
+// Runs `task` now and then every `ms`, skipping a run while the last one is
+// still going.
+function every(ms: number, name: string, task: () => Promise<void>): void {
   let running = false;
-  const tick = async () => {
+  const run = async () => {
     if (running) {
       return;
     }
     running = true;
     try {
-      await checkRivalries(client);
-      await sendWeeklyReports(client);
+      await task();
     } catch (err) {
-      console.error(`[rivals] check failed: ${err instanceof Error ? err.message : err}`);
+      console.error(`[rivals] ${name} failed: ${err instanceof Error ? err.message : err}`);
     } finally {
       running = false;
     }
   };
-  // Give the festival watcher time to load the catalog, which maps tracks to
-  // their leaderboards.
-  setTimeout(() => {
-    void tick();
-    setInterval(() => void tick(), CHECK_MS);
-  }, FIRST_CHECK_DELAY_MS);
+  void run();
+  setInterval(() => void run(), ms);
 }

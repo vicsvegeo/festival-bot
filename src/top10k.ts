@@ -11,7 +11,7 @@ import { getTrack, listTracks } from "./festival.js";
 export const TOP_BOARD_SIZE = 10_000;
 const SWEEP_DELAY_MS = 500;
 // This many failed boards in a row means Epic is down or the login broke;
-// the sweep gives up and the report retries next hour.
+// the sweep gives up and the report retries in 15 minutes.
 const MAX_CONSECUTIVE_FAILURES = 10;
 const TOP10K_COLOR = 0xffc83d;
 

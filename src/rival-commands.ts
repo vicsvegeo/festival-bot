@@ -30,7 +30,7 @@ import {
 } from "./rivals.js";
 import { getTop10kInstruments, setTop10kInstruments } from "./top10k.js";
 
-// Each rivalry is one leaderboard request an hour, so keep it bounded.
+// Each rivalry board is one leaderboard request a minute, so keep it bounded.
 const MAX_RIVALRIES = 50;
 const DEFAULT_INSTRUMENT: Instrument = "Solo_Vocals";
 const RIVAL_COLOR = 0xff4d6d;
@@ -154,7 +154,7 @@ async function handleList(interaction: ChatInputCommandInteraction): Promise<voi
     .setAuthor({ name: "⚔️ Fortnite Festival · Your rivalries" })
     .setTitle(link ? `As ${link.displayName}` : "Not linked")
     .setDescription(truncate(lines.join("\n"), 4096))
-    .setFooter({ text: "All-time scores, checked hourly · tap a rivalry below to stop it" });
+    .setFooter({ text: "All-time scores, checked every minute · tap a rivalry below to stop it" });
 
   // 5 rows of 5 buttons.
   const rows: ActionRowBuilder<ButtonBuilder>[] = [];
