@@ -27,6 +27,9 @@ const MAX_RELEASES_PER_POLL = 30;
 export const FESTIVAL_COLOR = 0xb44cff;
 const RELEASE_COLOR = 0x2fd4ff;
 const LEAVING_COLOR = 0xff8a3d;
+// Shown big under the "entered rotation" DM. Discord embeds need the direct
+// media file, not the tenor.com/view page.
+const GEM_ALERT_GIF = "https://media1.tenor.com/m/XDkbXSo2SbcAAAAC/gem-alarm-gem-alert.gif";
 export const UNSUBSCRIBE_PREFIX = "festunsub";
 export const SUBSCRIBE_PREFIX = "festsub";
 export const RELEASE_ALERTS_PREFIX = "festrel";
@@ -448,6 +451,16 @@ export function buildTrackEmbed(track: Track, kind: EmbedKind = "rotation"): Emb
   return embed;
 }
 
+// A subscriber DM: the track embed, plus the gem alert GIF when the song has
+// just entered the rotation.
+function buildAlertEmbed(track: Track, kind: "rotation" | "leaving"): EmbedBuilder {
+  const embed = buildTrackEmbed(track, kind);
+  if (kind === "rotation") {
+    embed.setImage(GEM_ALERT_GIF);
+  }
+  return embed;
+}
+
 export function buildUnsubscribeRow(trackId: string): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
@@ -549,7 +562,7 @@ export async function sendPreview(client: Client, discordUserId: string): Promis
   let sent = 0;
   const entering = inRotation.at(-1);
   if (entering) {
-    await user.send({ embeds: [buildTrackEmbed(entering)], components: [buildUnsubscribeRow(entering.id)] });
+    await user.send({ embeds: [buildAlertEmbed(entering, "rotation")], components: [buildUnsubscribeRow(entering.id)] });
     sent++;
   }
   const leaving = inRotation[0];
@@ -580,7 +593,7 @@ async function notifySubscribers(
     }
     try {
       const user = await client.users.fetch(row.discord_user_id);
-      await user.send({ embeds: [buildTrackEmbed(track, kind)], components: [buildUnsubscribeRow(track.id)] });
+      await user.send({ embeds: [buildAlertEmbed(track, kind)], components: [buildUnsubscribeRow(track.id)] });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[festival] failed to DM ${row.discord_user_id} about ${track.id}: ${message}`);
