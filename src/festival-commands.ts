@@ -39,6 +39,7 @@ import {
   UNSUBSCRIBE_PREFIX,
   unsubscribe,
 } from "./festival.js";
+import { RIVAL_COMMANDS } from "./rival-commands.js";
 
 const CATALOG_PREFIX = "festcat";
 const ARTISTS_PREFIX = "festart";
@@ -383,6 +384,8 @@ async function handleSubscriptions(interaction: ChatInputCommandInteraction): Pr
 }
 
 const COMMAND_NAMES = new Set(COMMANDS.map((c) => c.name));
+// commands.set replaces the whole list, so the rival commands go in with ours.
+const ALL_COMMANDS = [...COMMANDS, ...RIVAL_COMMANDS];
 const COMPONENT_PREFIXES = [CATALOG_PREFIX, ARTISTS_PREFIX, SUBSCRIBE_PREFIX, RELEASE_ALERTS_PREFIX, UNSUBSCRIBE_PREFIX];
 
 // Commands and components this module answers; autocomplete is excluded since
@@ -400,8 +403,8 @@ function isFestivalInteraction(interaction: Interaction): boolean {
 export function registerFestivalCommands(client: Client): void {
   client.once(Events.ClientReady, async (readyClient) => {
     try {
-      await readyClient.application.commands.set(COMMANDS);
-      console.log(`[festival] registered ${COMMANDS.length} slash commands`);
+      await readyClient.application.commands.set(ALL_COMMANDS);
+      console.log(`[festival] registered ${ALL_COMMANDS.length} slash commands`);
     } catch (err) {
       console.error(`[festival] command registration failed: ${err instanceof Error ? err.message : err}`);
     }

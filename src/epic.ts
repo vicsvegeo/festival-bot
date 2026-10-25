@@ -55,6 +55,9 @@ export function isTimelineConfigured(): boolean {
   return Boolean(process.env.EPIC_DEVICE_AUTH && process.env.EPIC_CLIENT);
 }
 
+// Leaderboards need the same login as the timeline.
+export const isEpicConfigured = isTimelineConfigured;
+
 export async function epicToken(body: Record<string, string>): Promise<{ access_token: string; expires_in: number; account_id?: string }> {
   const res = await fetch(TOKEN_URL, {
     method: "POST",
@@ -90,16 +93,136 @@ async function accessToken(): Promise<string> {
   return token.value;
 }
 
-// Track id -> when it leaves the rotation, from the newest timeline state
-// that's already in effect.
-export async function fetchTimelineRotation(): Promise<Map<string, Date | undefined>> {
-  const res = await fetch(TIMELINE_URL, {
-    headers: { Authorization: `Bearer ${await accessToken()}` },
+// A request as the logged-in Epic account. A 401 drops the cached token so
+// the next call logs in again.
+async function epicFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const res = await fetch(url, {
+    ...init,
+    headers: { ...init.headers, Authorization: `Bearer ${await accessToken()}` },
     signal: AbortSignal.timeout(30_000),
   });
   if (res.status === 401) {
     token = undefined;
   }
+  return res;
+}
+
+function loggedInAccountId(): string {
+  const auth = deviceAuth();
+  if (!auth) {
+    throw new Error("EPIC_DEVICE_AUTH is not set");
+  }
+  return auth.accountId;
+}
+
+export interface EpicAccount {
+  id: string;
+  displayName: string;
+}
+
+// Exact Epic display name -> account, or undefined when no account has it.
+export async function lookupEpicAccount(displayName: string): Promise<EpicAccount | undefined> {
+  const res = await epicFetch(
+    `https://account-public-service-prod.ol.epicgames.com/account/api/public/account/displayName/${encodeURIComponent(displayName)}`,
+  );
+  if (res.status === 404) {
+    return undefined;
+  }
+  if (!res.ok) {
+    throw new Error(`account lookup responded ${res.status}`);
+  }
+  const body = (await res.json()) as { id: string; displayName: string };
+  return { id: body.id, displayName: body.displayName };
+}
+
+// Leaderboard window codes, as the instrument part of an all-time board id.
+export const INSTRUMENTS = {
+  Solo_Guitar: "Lead",
+  Solo_Bass: "Bass",
+  Solo_Drums: "Drums",
+  Solo_Vocals: "Vocals",
+  Solo_PeripheralGuitar: "Pro Lead",
+  Solo_PeripheralBass: "Pro Bass",
+  Solo_PeripheralDrum: "Pro Drums",
+  Solo_PeripheralCymbals: "Pro Drums + Cymbals",
+  Solo_PeripheralVocals: "Karaoke",
+} as const;
+export type Instrument = keyof typeof INSTRUMENTS;
+
+export interface BoardScore {
+  accountId: string;
+  rank: number;
+  score: number;
+  accuracy?: number;
+  stars?: number;
+  fullCombo?: boolean;
+}
+
+// Epic rejects more than somewhere in the 30s accounts per scores request.
+const SCORES_BATCH = 25;
+
+// All-time scores for specific accounts on one song + instrument. Unlike the
+// public pages (top 10,000 only), this returns exact ranks at any depth.
+// Accounts with no score are absent. Undefined means the song has no such
+// leaderboard.
+export async function fetchAllTimeScores(
+  eventId: string,
+  instrument: Instrument,
+  accountIds: string[],
+): Promise<Map<string, BoardScore> | undefined> {
+  const scores = new Map<string, BoardScore>();
+  const unique = [...new Set(accountIds)];
+  for (let i = 0; i < unique.length; i += SCORES_BATCH) {
+    const res = await epicFetch(
+      `https://events-public-service-live.ol.epicgames.com/api/v2/games/FNFestival/leaderboards/alltime_${eventId}_${instrument}/alltime/scores?accountId=${loggedInAccountId()}&fromIndex=0&findTeams=false`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ teams: unique.slice(i, i + SCORES_BATCH).map((id) => [id]) }),
+      },
+    );
+    if (res.status === 400 || res.status === 404) {
+      const body = (await res.json().catch(() => ({}))) as { errorCode?: string };
+      // None of this batch has a score on the board.
+      if (body.errorCode?.includes("no_score_found")) {
+        continue;
+      }
+      if (body.errorCode?.includes("invalid_leaderboard") || body.errorCode?.includes("not_found")) {
+        return undefined;
+      }
+      throw new Error(`scores responded ${res.status} ${body.errorCode ?? ""}`);
+    }
+    if (!res.ok) {
+      throw new Error(`scores responded ${res.status}`);
+    }
+    type Entry = {
+      teamAccountIds: string[];
+      rank: number;
+      score: number;
+      sessionHistory?: { trackedStats?: Record<string, number> }[];
+    };
+    for (const entry of (await res.json()) as Entry[]) {
+      // The best run is the one the score came from.
+      const best = entry.sessionHistory
+        ?.map((s) => s.trackedStats ?? {})
+        .find((s) => s.SCORE === entry.score);
+      scores.set(entry.teamAccountIds[0], {
+        accountId: entry.teamAccountIds[0],
+        rank: entry.rank,
+        score: entry.score,
+        accuracy: best?.ACCURACY !== undefined ? best.ACCURACY / 10_000 : undefined,
+        stars: best?.STARS_EARNED,
+        fullCombo: best?.FULL_COMBO !== undefined ? best.FULL_COMBO === 1 : undefined,
+      });
+    }
+  }
+  return scores;
+}
+
+// Track id -> when it leaves the rotation, from the newest timeline state
+// that's already in effect.
+export async function fetchTimelineRotation(): Promise<Map<string, Date | undefined>> {
+  const res = await epicFetch(TIMELINE_URL);
   if (!res.ok) {
     throw new Error(`timeline responded ${res.status}`);
   }

@@ -36,6 +36,8 @@ export const RELEASE_ALERTS_PREFIX = "festrel";
 
 export interface Track {
   id: string;
+  // Epic's leaderboard id for the song (`su`), used in board names.
+  eventId?: string;
   title: string;
   artist: string;
   album?: string;
@@ -55,6 +57,7 @@ export interface Track {
 
 interface EpicTrack {
   sn: string;
+  su?: string;
   tt: string;
   an: string;
   ab?: string;
@@ -192,6 +195,7 @@ async function refreshCatalog(): Promise<void> {
     }
     next.set(t.sn, {
       id: t.sn,
+      eventId: t.su,
       title: t.tt.trim(),
       artist: (t.an ?? "").trim(),
       album: t.ab?.trim() || undefined,

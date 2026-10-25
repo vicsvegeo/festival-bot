@@ -3,6 +3,8 @@ import { createClient, registerConnectionLogging, startBot } from "./bot.js";
 import { testConnection } from "./db.js";
 import { startFestivalWatcher } from "./festival.js";
 import { registerFestivalCommands } from "./festival-commands.js";
+import { registerRivalCommands } from "./rival-commands.js";
+import { startRivalWatcher } from "./rivals.js";
 
 async function main(): Promise<void> {
   const token = process.env.DISCORD_BOT_TOKEN;
@@ -21,10 +23,14 @@ async function main(): Promise<void> {
   const client = createClient();
   registerConnectionLogging(client);
   registerFestivalCommands(client);
+  registerRivalCommands(client);
   await startBot(client, token);
 
   startFestivalWatcher(client).catch((err) => {
     console.error("[festival] watcher failed to start", err);
+  });
+  startRivalWatcher(client).catch((err) => {
+    console.error("[rivals] watcher failed to start", err);
   });
 }
 
