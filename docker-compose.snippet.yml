@@ -1,0 +1,14 @@
+# Add this service to /root/planka/docker-compose.yml on the server. It uses
+# its own `festival` database on the existing Planka Postgres container.
+
+services:
+  festival-bot:
+    image: ghcr.io/vicsvegeo/festival-bot:latest
+    restart: unless-stopped
+    environment:
+      DISCORD_BOT_TOKEN: ${FESTIVAL_DISCORD_BOT_TOKEN}
+      DATABASE_URL: ${FESTIVAL_DATABASE_URL}
+      EPIC_DEVICE_AUTH: ${EPIC_DEVICE_AUTH:-}
+      EPIC_CLIENT: ${EPIC_CLIENT:-}
+    depends_on:
+      - postgres

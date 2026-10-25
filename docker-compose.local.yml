@@ -1,0 +1,29 @@
+# Local test stack: a throwaway Postgres plus the bot built from this checkout.
+#   docker compose -f docker-compose.local.yml up --build
+# Reads DISCORD_BOT_TOKEN and the EPIC_* values from .env; DATABASE_URL is
+# overridden to point at the local database.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: festival
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d festival"]
+      interval: 2s
+      retries: 15
+
+  bot:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/festival
+      FESTIVAL_PREVIEW: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
